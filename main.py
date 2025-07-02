@@ -1,4 +1,5 @@
 import os
+import re
 import pandas as pd
 from datetime import datetime, timedelta
 from data_processor import DataProcessor
@@ -93,14 +94,23 @@ def update_weekly_report(output_file: str, date_tag: str):
     df_new = df_new.sort_values(by='SortDate', na_position='last').drop(columns=['SortDate'])
 
     # 📈 Recompute Weekly Avg
+    try:
+        util_vals = df_new['OHT Utilization (%)'].dropna().apply(lambda x: float(str(x).replace('%', '').strip()))
+        util_avg = util_vals.mean()
+    except Exception:
+        util_avg = pd.NA
+
+    try:
+        fail_vals = df_new['Failure Rate (%)'].dropna().apply(lambda x: float(str(x).replace('%', '').strip()))
+        fail_avg = f"{fail_vals.mean():.5f}%" if not fail_vals.empty else pd.NA
+    except Exception:
+        fail_avg = pd.NA
+
     df_avg = {
         'Date': 'Weekly Avg',
         'Avg EXECUTE PERIOD': df_new['Avg EXECUTE PERIOD'].apply(pd.to_numeric, errors='coerce').mean(),
-        'OHT Utilization (%)': f"{df_new['OHT Utilization (%)'].apply(lambda x: float(str(x).replace('%', ''))).mean():.2f}%",
-        'Failure Rate (%)': (
-            f"{df_new['Failure Rate (%)'].dropna().apply(lambda x: float(str(x).replace('%', ''))).mean():.5f}%"
-            if df_new['Failure Rate (%)'].notna().any() else pd.NA
-        ),
+        'OHT Utilization (%)': f"{util_avg:.2f}%" if pd.notna(util_avg) else pd.NA,
+        'Failure Rate (%)': fail_avg,
         'Transfer Count': df_new['Transfer Count'].sum()
     }
 
@@ -120,6 +130,7 @@ def update_weekly_report(output_file: str, date_tag: str):
         print(f"✅ Weekly_Report updated and moved to the end.")
     wb.close()
 
+
 if __name__ == "__main__":
     data_dir = "data"
     output_dir = "output"
@@ -133,14 +144,31 @@ if __name__ == "__main__":
     output_file = os.path.join(output_dir, "OHT_Daily_Report.xlsx")
     file_exists = os.path.exists(output_file)
 
-    date_tag = (datetime.today() - timedelta(days=1)).strftime('%Y%m%d')
+    # 📅 Extract date from filename
+    match = re.search(r'20\d{6}', transfer_file)
+    if match:
+        file_date = datetime.strptime(match.group(), '%Y%m%d')
+        date_tag = (file_date - timedelta(days=1)).strftime('%Y%m%d')
+        print(f"📆 Detected date in filename: {match.group()} → Using date_tag: {date_tag}")
+    else:
+        date_tag = (datetime.today() - timedelta(days=1)).strftime('%Y%m%d')
+        print(f"⚠️ No valid date found in filename — defaulting to: {date_tag}")
 
     df_result = process_transfer_time_excel(input_path)
     pivot_df = generate_execute_period_pivot(df_result)
     hourly_df = compute_hourly_avg(df_result)
     utilization_df = compute_oht_utilization(df_result)
 
-    with pd.ExcelWriter(output_file, engine='openpyxl', mode='a' if file_exists else 'w', if_sheet_exists='replace') as writer:
+    # ✅ Handle mode and if_sheet_exists based on file existence
+    mode = 'a' if file_exists else 'w'
+    writer_kwargs = {
+        "engine": "openpyxl",
+        "mode": mode
+    }
+    if mode == 'a':
+        writer_kwargs["if_sheet_exists"] = "replace"
+
+    with pd.ExcelWriter(output_file, **writer_kwargs) as writer:
         df_result.to_excel(writer, sheet_name=f'{date_tag}_Processed', index=False)
         pivot_df.to_excel(writer, sheet_name=f'{date_tag}_PivotSource', index=False)
         hourly_df.to_excel(writer, sheet_name=f'{date_tag}_HourlyADT', index=False)
